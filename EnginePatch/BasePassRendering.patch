@@ -1,0 +1,30 @@
+--- a/Engine/Source/Runtime/Renderer/Private/BasePassRendering.cpp
++++ b/Engine/Source/Runtime/Renderer/Private/BasePassRendering.cpp
+@@ -1,4 +1,12 @@
+ // Copyright Epic Games, Inc. All Rights Reserved.
+
++#include "SceneTextures.h"
++void (*GBCGBuffer_SubstituteCallback)(FRDGBuilder& GraphBuilder, const FSceneView& View, FSceneTextures& SceneTextures) = nullptr;
++void RegisterBCGBufferSubstituteCallback(void (*Callback)(FRDGBuilder&, const FSceneView&, FSceneTextures&))
++{
++	GBCGBuffer_SubstituteCallback = Callback;
++}
++
+ #include "BasePassRendering.h"
+ #include "DeferredShadingRenderer.h"
+@@ -1303,6 +1311,17 @@
+ 	}
+
++	if (GBCGBuffer_SubstituteCallback)
++	{
++		const FRDGTextureRef PrevA = SceneTextures.GBufferA;
++		const FRDGTextureRef PrevB = SceneTextures.GBufferB;
++		const FRDGTextureRef PrevC = SceneTextures.GBufferC;
++		for (FViewInfo& View : InViews)
++			GBCGBuffer_SubstituteCallback(GraphBuilder, View, SceneTextures);
++		if (SceneTextures.GBufferA != PrevA || SceneTextures.GBufferB != PrevB || SceneTextures.GBufferC != PrevC)
++			SceneTextures.UniformBuffer = CreateSceneTextureUniformBuffer(GraphBuilder, &SceneTextures, Renderer.FeatureLevel, SceneTextures.SetupMode);
++	}
++
+ 	if (bRequiresFarZQuadClear)
+ 	{

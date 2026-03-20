@@ -1,0 +1,215 @@
+// BCGBufferEncode.usf
+//
+// Compresses a single G-Buffer render target into a BC-format texture.
+// Called once per G-Buffer channel group immediately after the Base Pass.
+//
+// Each thread processes one 4x4 pixel block.
+// Dispatch: (ceil(W/4/8), ceil(H/4/8), 1)  with [numthreads(8,8,1)]
+//
+// ENCODE_MODE permutation:
+//   0 = BC1  BaseColor RGB    -> RWTexture2D<uint2>  (8 bytes/block, direct write)
+//   1 = BC5  Normal   RG      -> RWTexture2D<uint4>  (16 bytes/block, direct write)
+//   2 = BC4  Single   R       -> RWTexture2D<uint2>  (8 bytes/block, direct write)
+//   3 = BC3  round-trip RGBA  -> RWTexture2D<float4> full-res decoded  [GBufferC BaseColor+AO]
+//   4 = BC5  round-trip RG+BA -> RWTexture2D<float4> full-res decoded  [GBufferA Normal, BA passthrough]
+//   5 = BC1  round-trip RGB+A -> RWTexture2D<float4> full-res decoded  [GBufferB ORM, A passthrough]
+//   6 = BC3  RGBA direct      -> RWTexture2D<uint4>  (16 bytes/block) [BC4 alpha + BC1 RGB]
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/BCCompressionCommon.ush"
+
+Texture2D SrcTexture;
+
+// BC1 / BC4: 8-byte block -> uint2 per block
+#if ENCODE_MODE == 0 || ENCODE_MODE == 2
+RWTexture2D<uint2> OutTextureBlock2;
+#endif
+
+// BC5 / BC3: 16-byte block -> uint4 per block
+#if ENCODE_MODE == 1 || ENCODE_MODE == 6
+RWTexture2D<uint4> OutTextureBlock4;
+#endif
+
+// Round-trip modes: full-resolution decoded float4 output
+#if ENCODE_MODE >= 3
+RWTexture2D<float4> OutTextureRGBA;
+
+// Decode one BC1 RGB value for pixel index idx (0-15).
+float3 DecodeBC1(uint2 Block, uint idx)
+{
+    uint c0r = Block.x & 0xFFFFu;
+    uint c1r = (Block.x >> 16u) & 0xFFFFu;
+    float3 c0 = float3(float((c0r >> 11u) & 0x1Fu)/31.f, float((c0r >> 5u) & 0x3Fu)/63.f, float(c0r & 0x1Fu)/31.f);
+    float3 c1 = float3(float((c1r >> 11u) & 0x1Fu)/31.f, float((c1r >> 5u) & 0x3Fu)/63.f, float(c1r & 0x1Fu)/31.f);
+    uint sel = (Block.y >> (idx * 2u)) & 0x3u;
+    bool fc = (c0r > c1r);
+    float3 c2 = fc ? (2.f*c0 + c1)/3.f : (c0 + c1)*0.5f;
+    float3 c3 = fc ? (c0 + 2.f*c1)/3.f : float3(0.f,0.f,0.f);
+    return (sel == 0u) ? c0 : (sel == 1u) ? c1 : (sel == 2u) ? c2 : c3;
+}
+
+// Decode one BC4 scalar value for pixel index idx (0-15).
+// 48-bit index field: bits 0-15 in Block.x[31:16], bits 16-47 in Block.y.
+float DecodeBC4(uint2 Block, uint idx)
+{
+    float a0 = float( Block.x        & 0xFFu) / 255.f;
+    float a1 = float((Block.x >>  8u) & 0xFFu) / 255.f;
+    uint bs  = idx * 3u;
+    uint sel = (bs < 16u) ? (((Block.x >> 16u) | (Block.y << 16u)) >> bs) & 0x7u
+                           : (Block.y >> (bs - 16u)) & 0x7u;
+    bool hi = (a0 > a1);
+    float a2 = hi ? (6.f*a0+    a1)/7.f : (4.f*a0+    a1)/5.f;
+    float a3 = hi ? (5.f*a0+2.f*a1)/7.f : (3.f*a0+2.f*a1)/5.f;
+    float a4 = hi ? (4.f*a0+3.f*a1)/7.f : (2.f*a0+3.f*a1)/5.f;
+    float a5 = hi ? (3.f*a0+4.f*a1)/7.f : (    a0+4.f*a1)/5.f;
+    float a6 = hi ? (2.f*a0+5.f*a1)/7.f : 0.f;
+    float a7 = hi ? (    a0+6.f*a1)/7.f : 1.f;
+    return (sel==0u)?a0:(sel==1u)?a1:(sel==2u)?a2:(sel==3u)?a3:(sel==4u)?a4:(sel==5u)?a5:(sel==6u)?a6:a7;
+}
+#endif // ENCODE_MODE >= 3
+
+uint2 SrcSize;    // Full-resolution G-Buffer size in pixels
+uint2 BlockCount; // (W/4, H/4) — number of 4x4 blocks
+
+[numthreads(8, 8, 1)]
+void BCGBufferEncodeCS(
+    uint3 GroupId       : SV_GroupID,
+    uint3 GroupThreadId : SV_GroupThreadID)
+{
+    uint2 BlockXY     = GroupId.xy * 8u + GroupThreadId.xy;
+    uint2 PixelOrigin = BlockXY * 4u;
+
+    if (any(BlockXY >= BlockCount))
+        return;
+
+#if ENCODE_MODE == 0
+    // ---- BC1: compress RGB (BaseColor) ----
+    float3 Block[16];
+    UNROLL for (uint i = 0; i < 16; ++i)
+    {
+        uint2 UV = min(PixelOrigin + uint2(i & 3u, i >> 2u), SrcSize - 1u);
+        Block[i] = SrcTexture.Load(int3(UV, 0)).rgb;
+    }
+    OutTextureBlock2[BlockXY] = CompressBC1Block(Block);
+
+#elif ENCODE_MODE == 1
+    // ---- BC5: compress RG (oct-encoded Normal) ----
+    float BlockR[16];
+    float BlockG[16];
+    UNROLL for (uint i = 0; i < 16; ++i)
+    {
+        uint2 UV  = min(PixelOrigin + uint2(i & 3u, i >> 2u), SrcSize - 1u);
+        float2 RG = SrcTexture.Load(int3(UV, 0)).rg;
+        BlockR[i] = RG.r;
+        BlockG[i] = RG.g;
+    }
+    OutTextureBlock4[BlockXY] = CompressBC5Block(BlockR, BlockG);
+
+#elif ENCODE_MODE == 2
+    // ---- BC4: compress single channel R ----
+    float Block[16];
+    UNROLL for (uint i = 0; i < 16; ++i)
+    {
+        uint2 UV = min(PixelOrigin + uint2(i & 3u, i >> 2u), SrcSize - 1u);
+        Block[i] = SrcTexture.Load(int3(UV, 0)).r;
+    }
+    OutTextureBlock2[BlockXY] = CompressBC4Block(Block);
+
+#elif ENCODE_MODE == 3
+    // ---- GBufferC BC3 ROUND-TRIP: RGB→BC1, Alpha→BC4, decode back ----
+    // BaseColor.rgb compressed with BC1, AO.a compressed with BC4.
+    float3 BlockRGB[16];
+    float  BlockA[16];
+    UNROLL for (uint i = 0; i < 16; ++i)
+    {
+        uint2 UV    = min(PixelOrigin + uint2(i & 3u, i >> 2u), SrcSize - 1u);
+        float4 px   = SrcTexture.Load(int3(UV, 0));
+        BlockRGB[i] = px.rgb;
+        BlockA[i]   = px.a;
+    }
+    uint2 RGBBlock   = CompressBC1Block(BlockRGB);
+    uint2 AlphaBlock = CompressBC4Block(BlockA);
+
+    for (uint j = 0; j < 16u; ++j)
+    {
+        uint2 PixelXY = PixelOrigin + uint2(j & 3u, j >> 2u);
+        if (PixelXY.x < SrcSize.x && PixelXY.y < SrcSize.y)
+        {
+            OutTextureRGBA[PixelXY] = float4(DecodeBC1(RGBBlock, j), DecodeBC4(AlphaBlock, j));
+        }
+    }
+
+#elif ENCODE_MODE == 4
+    // ---- GBufferA BC5 ROUND-TRIP: RG→BC5, BA passthrough ----
+    // Oct-encoded Normal RG compressed with BC5 (two independent BC4 channels).
+    // B and A (PerObjectGBufferData) pass through uncompressed.
+    float BlockR[16];
+    float BlockG[16];
+    UNROLL for (uint i = 0; i < 16; ++i)
+    {
+        uint2 UV    = min(PixelOrigin + uint2(i & 3u, i >> 2u), SrcSize - 1u);
+        float4 px   = SrcTexture.Load(int3(UV, 0));
+        BlockR[i]   = px.r;
+        BlockG[i]   = px.g;
+    }
+    // CompressBC5Block returns uint4: {RBlock.xy, GBlock.xy}
+    uint4 BC5Block = CompressBC5Block(BlockR, BlockG);
+    uint2 RBlock   = BC5Block.xy;
+    uint2 GBlock   = BC5Block.zw;
+
+    for (uint j = 0; j < 16u; ++j)
+    {
+        uint2 PixelXY = PixelOrigin + uint2(j & 3u, j >> 2u);
+        if (PixelXY.x < SrcSize.x && PixelXY.y < SrcSize.y)
+        {
+            float4 orig = SrcTexture.Load(int3(PixelXY, 0));
+            OutTextureRGBA[PixelXY] = float4(
+                DecodeBC4(RBlock, j),
+                DecodeBC4(GBlock, j),
+                orig.b,   // passthrough: unused normal channel
+                orig.a);  // passthrough: PerObjectGBufferData
+        }
+    }
+
+#elif ENCODE_MODE == 5
+    // ---- GBufferB BC1 ROUND-TRIP: RGB→BC1, A passthrough ----
+    // Metallic.r + Specular.g + Roughness.b compressed with BC1.
+    // A (ShadingModelID + packed data) passes through uncompressed — critical metadata.
+    float3 BlockRGB[16];
+    UNROLL for (uint i = 0; i < 16; ++i)
+    {
+        uint2 UV    = min(PixelOrigin + uint2(i & 3u, i >> 2u), SrcSize - 1u);
+        BlockRGB[i] = SrcTexture.Load(int3(UV, 0)).rgb;
+    }
+    uint2 RGBBlock = CompressBC1Block(BlockRGB);
+
+    for (uint j = 0; j < 16u; ++j)
+    {
+        uint2 PixelXY = PixelOrigin + uint2(j & 3u, j >> 2u);
+        if (PixelXY.x < SrcSize.x && PixelXY.y < SrcSize.y)
+        {
+            float orig_a = SrcTexture.Load(int3(PixelXY, 0)).a;
+            OutTextureRGBA[PixelXY] = float4(DecodeBC1(RGBBlock, j), orig_a);
+        }
+    }
+
+#elif ENCODE_MODE == 6
+    // ---- BC3 DIRECT: RGBA → BC3 (BC4 alpha block + BC1 color block) ----
+    // 16 bytes/block layout: [alpha_lo, alpha_hi, color_lo, color_hi] as uint4
+    // Preserves all 4 channels. Used for GBufferA (Normal+PerObjectData) and
+    // GBufferB (ORM + ShadingModelID in alpha).
+    float3 BlockRGB[16];
+    float  BlockA[16];
+    UNROLL for (uint i = 0; i < 16; ++i)
+    {
+        uint2 UV    = min(PixelOrigin + uint2(i & 3u, i >> 2u), SrcSize - 1u);
+        float4 px   = SrcTexture.Load(int3(UV, 0));
+        BlockRGB[i] = px.rgb;
+        BlockA[i]   = px.a;
+    }
+    uint2 AlphaBlock = CompressBC4Block(BlockA);   // 8 bytes
+    uint2 ColorBlock = CompressBC1Block(BlockRGB);  // 8 bytes
+    // BC3 memory layout: alpha block first, color block second
+    OutTextureBlock4[BlockXY] = uint4(AlphaBlock.x, AlphaBlock.y, ColorBlock.x, ColorBlock.y);
+#endif
+}

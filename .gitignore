@@ -1,0 +1,5 @@
+Plugins/BCGBuffer/Intermediate/
+Plugins/BCGBuffer/Binaries/
+*.obj
+*.pdb
+*.pch
