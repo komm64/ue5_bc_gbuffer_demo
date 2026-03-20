@@ -209,10 +209,27 @@ The plugin compiles as a standard UE5 plugin — no engine source modifications 
 
 ## Roadmap
 
-### 1. GBufferC: BC1 → BC3 (AO preservation)
+### 1. BCGBuffer-native layout: per-channel format assignment
+
+The current implementation compresses UE5's existing G-Buffer layout as-is (three RGBA8 textures). This is the root cause of the visible block noise: BC1 encodes RGB jointly, which works well for correlated colour data but breaks down when the three channels are independent — as is the case for Metallic, Specular, and Roughness packed into GBufferB.
+
+The correct approach is to design a BCGBuffer-specific layout where each texture is matched to the BC format that suits its content:
+
+| Data | BC format | Rationale |
+|---|---|---|
+| BaseColor (RGB) | BC1 | Channels are correlated — BC1 is well-suited |
+| Normal (oct-encoded RG) | BC5 | Two independent channels — BC5 encodes each separately |
+| Roughness | BC4 | Single channel |
+| Metallic | BC4 | Single channel |
+| AO | BC4 | Single channel |
+| ShadingModelID | Uncompressed | Discrete integer values — BC compression destroys them |
+
+This would eliminate the inter-channel coupling artefacts and produce output visually indistinguishable from the uncompressed G-Buffer at the same compression ratios. It requires redesigning the G-Buffer write path alongside the compression pass, which is a more invasive change than the current proof-of-concept.
+
+### 2. GBufferC: BC1 → BC3 (AO preservation)
 BC1 discards the AO alpha channel. Switching GBufferC to BC3 preserves all four channels at 16 bytes/block instead of 8. The shader permutation (`ENCODE_MODE 6`) is already implemented; only the channel descriptor in `BCGBufferPass.cpp` needs updating.
 
-### 2. Transient memory reclaim *(core value proposition)*
+### 3. Transient memory reclaim *(core value proposition)*
 
 BC-compressing the G-Buffer alone does not reduce peak VRAM — during the compression pass, both the original G-Buffer textures (~24 MB at 1080p) and the BC output (~5 MB) exist simultaneously. The real savings occur only when the originals are freed and their backing memory is reassigned to subsequent allocations within the same frame.
 
@@ -222,16 +239,16 @@ Without this step, the technique saves bandwidth (smaller textures = less data f
 
 Enable with `r.RDG.TransientAllocator 1` (off by default in editor builds) and verify with `stat RHI` → `RenderTargetMemory2D`.
 
-### 3. Per-channel quality control
+### 4. Per-channel quality control
 Expose per-channel CVar switches (compress / passthrough / BC7 high-quality) so developers can tune the bandwidth–quality tradeoff for their content and budget.
 
-### 4. Depth buffer (read path only)
+### 5. Depth buffer (read path only)
 The depth buffer is already hardware-compressed for the depth test but is read uncompressed when sampled as a texture by SSAO, Lumen, and deferred lighting. A separate BC4 depth copy for texture reads could reduce that bandwidth. This requires more invasive Renderer changes and per-pass precision validation; it is out of scope for the current proof-of-concept.
 
-### 5. Performance measurement methodology
+### 6. Performance measurement methodology
 Frame-time savings are content- and hardware-dependent. A focused microbenchmark — many deferred lights, complex geometry, GPU bandwidth-limited scenario — would better isolate the effect than a general scene.
 
-### 6. Console platform support
+### 7. Console platform support
 Investigate platform-specific format reinterpret paths (GCN `HTILE` interactions, PS5 DCC) as alternatives to the compute encode pass on platforms where direct format aliasing is available.
 
 ---
