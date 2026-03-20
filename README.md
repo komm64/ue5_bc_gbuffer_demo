@@ -10,7 +10,7 @@ Verified with RenderDoc on both AMD/NVIDIA (UAV aliasing path) and Intel Iris Xe
 
 This technique is a niche tool, not a general-purpose optimisation. It is irrelevant on high-end discrete GPUs where VRAM is plentiful and the memory subsystem is not the bottleneck. It is aimed at two specific hardware profiles:
 
-- **VRAM-constrained devices** — integrated graphics (Intel Iris Xe, AMD Radeon 890M, Apple Silicon), mobile GPUs, and future XR/AR hardware where the total memory budget is small. Shrinking the G-Buffer from ~95 MB to ~20 MB at 4K frees headroom that can be filled with more scene content.
+- **VRAM-constrained devices** — integrated graphics (Intel Iris Xe, AMD Radeon 890M, Apple Silicon), mobile GPUs, and future XR/AR hardware where the total memory budget is small. The BC textures themselves are 4–8× smaller; once the original G-Buffer allocations are freed and their VRAM is reclaimed for reuse within the same frame (see Roadmap: Transient memory reclaim), the peak VRAM footprint drops by ~19 MB at 1080p and ~75 MB at 4K. **Note: the transient reclaim step is not yet implemented in this proof-of-concept.**
 - **Memory-bandwidth-bound scenarios** — GPUs where compute throughput is high relative to memory bandwidth. If G-Buffer texture fetches are the bottleneck, reducing the data volume by 4–8× directly reduces Lighting Pass fetch time. Our testing on desktop and Surface Pro 7 did not hit this bottleneck (see below), but it is a realistic constraint on bandwidth-limited hardware.
 
 The technique accepts a visible quality tradeoff — block compression artefacts — in exchange for these gains. It is most appropriate for developers targeting constrained hardware who are willing to trade some visual fidelity for memory headroom or bandwidth relief.
@@ -27,11 +27,13 @@ This project applies that tradeoff to the G-Buffer itself.
 
 ### What this is and is not
 
-**This is** a VRAM footprint reduction technique. The three main G-Buffer channels shrink from ~95 MB to ~20 MB at 4K.
+**This is** a proof-of-concept that BC-compresses the G-Buffer and wires the compressed textures into the Lighting Pass. The BC textures are 4–8× smaller than the originals. On hardware where G-Buffer bandwidth is the bottleneck, this reduces Lighting Pass fetch volume proportionally.
+
+**This is not** a complete VRAM reduction solution yet. Peak VRAM drops only once the original G-Buffer allocations are freed and their backing memory reclaimed for reuse within the same frame — the transient reclaim step, which is on the roadmap but not yet implemented. In the current proof-of-concept, both the original G-Buffer textures and the BC output exist simultaneously during the compression pass.
 
 **This is not** a guaranteed frame-time improvement. In our testing — VirtualStudio scene at 1080p through 4K on desktop (AMD/NVIDIA) and Surface Pro 7 (Intel Iris Xe) — enabling BC compression produced no measurable change in GPU frame time. The reason is structural: in deferred shading, G-Buffer texture reads and lighting computation both scale proportionally with pixel count, so the bottleneck does not shift. Frame-time gains would require a scene and resolution where G-Buffer bandwidth is the specific bottleneck — narrower than initially expected.
 
-The honest value proposition is headroom: **the same VRAM budget fits more scene content**.
+The honest value proposition of this proof-of-concept: **the engine integration works, BC textures are verified in RenderDoc, and the path to VRAM and bandwidth savings is established**.
 
 ---
 
