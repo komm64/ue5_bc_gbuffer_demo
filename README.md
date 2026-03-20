@@ -6,6 +6,17 @@ Verified with RenderDoc on both AMD/NVIDIA (UAV aliasing path) and Intel Iris Xe
 
 ---
 
+## Who this is for
+
+This technique is a niche tool, not a general-purpose optimisation. It is irrelevant on high-end discrete GPUs where VRAM is plentiful and the memory subsystem is not the bottleneck. It is aimed at two specific hardware profiles:
+
+- **VRAM-constrained devices** — integrated graphics (Intel Iris Xe, AMD Radeon 890M, Apple Silicon), mobile GPUs, and future XR/AR hardware where the total memory budget is small. Shrinking the G-Buffer from ~95 MB to ~20 MB at 4K frees headroom that can be filled with more scene content.
+- **Memory-bandwidth-bound scenarios** — GPUs where compute throughput is high relative to memory bandwidth. If G-Buffer texture fetches are the bottleneck, reducing the data volume by 4–8× directly reduces Lighting Pass fetch time. Our testing on desktop and Surface Pro 7 did not hit this bottleneck (see below), but it is a realistic constraint on bandwidth-limited hardware.
+
+The technique accepts a visible quality tradeoff — block compression artefacts — in exchange for these gains. It is most appropriate for developers targeting constrained hardware who are willing to trade some visual fidelity for memory headroom or bandwidth relief.
+
+---
+
 ## Motivation
 
 A 4K deferred scene carries three or more mandatory G-Buffer render targets (Normal, BaseColor/AO, Roughness/Metallic/Specular) at 4 bytes per pixel each. At 3840×2160 that is roughly **95 MB** of VRAM occupied every frame, read in full by the Lighting Pass and every subsequent pass that reconstructs world position or surface properties.
