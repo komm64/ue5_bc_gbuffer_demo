@@ -37,6 +37,14 @@ With `r.BCGBuffer.Enable 1`, RenderDoc shows:
 
 Block artifacts are visible on-screen when compression is active, confirming that the Lighting Pass is reading actual BC data.
 
+![RenderDoc: BC3_TYPELESS output texture](docs/renderdoc_bc_textures.png)
+
+### Visual confirmation (block noise)
+
+| BCGBuffer OFF | BCGBuffer ON |
+|---|---|
+| ![BC OFF](docs/scene_bc_off.png) | ![BC ON](docs/scene_bc_on.png) |
+
 ### Hardware tested
 
 | Hardware | UAV aliasing | Path used | Result |
