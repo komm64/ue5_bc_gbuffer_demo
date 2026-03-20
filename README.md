@@ -45,6 +45,14 @@ Block artifacts are visible on-screen when compression is active, confirming tha
 |---|---|
 | ![BC OFF](docs/scene_bc_off.png) | ![BC ON](docs/scene_bc_on.png) |
 
+Cropped details:
+
+| BCGBuffer OFF | BCGBuffer ON |
+|---|---|
+| ![BC OFF a](docs/scene_bc_off_a.png) | ![BC ON a](docs/scene_bc_on_a.png) |
+| ![BC OFF b](docs/scene_bc_off_b.png) | ![BC ON b](docs/scene_bc_on_b.png) |
+| ![BC OFF c](docs/scene_bc_off_c.png) | ![BC ON c](docs/scene_bc_on_c.png) |
+
 ### Hardware tested
 
 | Hardware | UAV aliasing | Path used | Result |
