@@ -109,9 +109,9 @@ The 4.8× ratio reflects the mix: GBufferC uses BC1 (8×), GBufferA and GBufferB
 
 | G-Buffer | Content | BC format | Block size | Compression |
 |---|---|---|---|---|
-| GBufferC | BaseColor (RGB) + AO (α) | BC1 | 8 B/block | 8× vs RGBA8 — AO channel sacrificed |
-| GBufferA | Normal oct-encoded + PerObjectData | BC3 | 16 B/block | 4× vs RGBA8 — all 4 channels preserved |
-| GBufferB | Metallic/Specular/Roughness + ShadingModelID | BC3 | 16 B/block | 4× vs RGBA8 — ShadingModelID (α) preserved |
+| GBufferC | BaseColor (RGB) + AO (α) | BC1 | 8 B/block | 8× vs 32 bpp — AO channel sacrificed |
+| GBufferA | Normal oct-encoded + PerObjectData | BC3 | 16 B/block | 4× vs 32 bpp — all 4 channels preserved |
+| GBufferB | Metallic/Specular/Roughness + ShadingModelID | BC3 | 16 B/block | 4× vs 32 bpp — ShadingModelID (α) preserved |
 | Depth | — | — | — | Excluded: precision-critical; already hardware-compressed for depth test |
 | Velocity | — | — | — | Excluded: sub-pixel TAA sensitivity |
 
@@ -135,7 +135,7 @@ A 13-line patch to `BasePassRendering.cpp` adds a function-pointer hook immediat
 // Top of BasePassRendering.cpp:
 #include "SceneTextures.h"
 void (*GBCGBuffer_SubstituteCallback)(FRDGBuilder&, const FSceneView&, FSceneTextures&) = nullptr;
-void RegisterBCGBufferSubstituteCallback(void (*Callback)(...)) {
+void RegisterBCGBufferSubstituteCallback(void (*Callback)(FRDGBuilder&, const FSceneView&, FSceneTextures&)) {
     GBCGBuffer_SubstituteCallback = Callback;
 }
 
@@ -159,7 +159,6 @@ The full patch is in `EnginePatch/BasePassRendering.patch`.
 ## Repository Structure
 
 ```
-ue5_bc_gbuffer_demo.uproject
 ├── EnginePatch/
 │   ├── BasePassRendering.patch      # Unified diff for UE 5.7 engine patch (+13 lines)
 │   └── SceneTextures.patch.md       # Notes: why SceneTextures.cpp needs no changes
@@ -192,7 +191,7 @@ Apply to `Engine/Source/Runtime/Renderer/Private/BasePassRendering.cpp`, then re
 ### Build the plugin
 
 ```
-Build.bat VirtualStudioEditor Win64 Development VirtualStudio.uproject
+Build.bat <YourProjectEditor> Win64 Development <YourProject>.uproject
 ```
 
 The plugin compiles as a standard UE5 plugin — no engine source modifications beyond the patch.
@@ -224,7 +223,7 @@ The plugin compiles as a standard UE5 plugin — no engine source modifications 
 
 ### 1. BCGBuffer-native layout: per-channel format assignment
 
-The current implementation compresses UE5's existing G-Buffer layout as-is (three RGBA8 textures). This is the root cause of the visible block noise: BC1 encodes RGB jointly, which works well for correlated colour data but breaks down when the three channels are independent — as is the case for Metallic, Specular, and Roughness packed into GBufferB.
+The current implementation compresses UE5's existing G-Buffer layout as-is (GBufferA: `A2B10G10R10`, GBufferB/C: `B8G8R8A8` — all 32 bpp but different formats). This is the root cause of the visible block noise: BC1 encodes RGB jointly, which works well for correlated colour data but breaks down when the three channels are independent — as is the case for Metallic, Specular, and Roughness packed into GBufferB.
 
 The correct approach is to design a BCGBuffer-specific layout where each texture is matched to the BC format that suits its content:
 
@@ -233,6 +232,7 @@ The correct approach is to design a BCGBuffer-specific layout where each texture
 | BaseColor (RGB) | BC1 | Channels are correlated — BC1 is well-suited |
 | Normal (oct-encoded RG) | BC5 | Two independent channels — BC5 encodes each separately |
 | Roughness | BC4 | Single channel |
+| Specular | BC4 | Single channel |
 | Metallic | BC4 | Single channel |
 | AO | BC4 | Single channel |
 | ShadingModelID | Uncompressed | Discrete integer values — BC compression destroys them |
